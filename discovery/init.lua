@@ -5,7 +5,7 @@ local netbox = require 'net.box'
 local background = require 'background'
 
 local Tarantool = {}
-Tarantool.__index = {}
+Tarantool.__index = Tarantool
 
 function Tarantool.new(_, opts)
 	assert(opts.addr, "Tarantool:new: opts.addr is required")
@@ -19,6 +19,7 @@ function Tarantool.new(_, opts)
 		timeout = self.timeout,
 	})
 
+	self.on_the_fly = 0
 	self.conn = conn
 	self.connected = false
 
@@ -57,6 +58,19 @@ function Tarantool.new(_, opts)
 end
 setmetatable(Tarantool, { __call = Tarantool.new })
 
+local function tt_tail_call(self, ...)
+	self.on_the_fly = self.on_the_fly - 1
+	if self.closed then
+		self.conn.connected = false
+		self.conn:close()
+	end
+	return ...
+end
+
+function Tarantool:call(method, args, opts, ctx)
+	self.on_the_fly = self.on_the_fly + 1
+	return tt_tail_call(self, pcall(self.conn.call, self.conn, method, args, opts))
+end
 
 function M.new(_, args)
 	assert(type(args) == 'table', "discovery: args must be a table")
@@ -86,14 +100,62 @@ function M.new(_, args)
 	self.conds = {}
 
 	if self.autoconnect ~= false then
-		self:connect()
+		if self.upstream.etcd then
+			local config = require 'config'
+			self.etcd_f = background {
+				name = 'discovery/etcd',
+				wait = false,
+				restart = true,
+				run_interval = self.upstream.etcd.refresh_timeout,
+				setup = function(ctx) ctx.endpoints = {} end,
+				func = function(ctx)
+					local result, response = config.etcd:list(self.upster.etcd.prefix)
+					local endpoints = {}
+					for _, info in pairs(result) do
+						if not info.disabled then
+							endpoints[info.box.remote_addr or info.box.listen] = true
+						end
+					end
+					local do_connect
+					for endpoint in pairs(endpoints) do
+						if ctx.endpoints[endpoint] == nil then
+							do_connect = true
+							break
+						end
+					end
+					for endpoint in pairs(ctx.endpoints) do
+						if not endpoints[endpoint] then
+							do_connect = true
+							break
+						end
+					end
+
+					if do_connect then
+						ctx.endpoints = endpoints
+						local list = {}
+						for endpoint in pairs(ctx.endpoints) do
+							table.insert(list, endpoint)
+						end
+						self:connect(list)
+
+						for addr, tnt in pairs(self.nodes) do
+							if not ctx.endpoints[addr] then
+								self:expose(addr, tnt)
+							end
+						end
+					end
+				end,
+			}
+		else
+			self:connect(self.upstream.endpoints)
+		end
 	end
 
 	return self
 end
 
-function M:connect()
-	for _, addr in pairs(self.upstream.endpoints) do
+function M:connect(endpoints)
+	for _, addr in pairs(endpoints) do
 		self.nodes[addr] = Tarantool {
 			addr = addr,
 			reconnect_timeout = self.upstream.reconnect_timeout,
@@ -126,6 +188,21 @@ function M:on_disconnect(addr, tnt)
 	log.info("Gracefull shutdown for background discovery for %s", addr)
 	tnt.discovery_f:shutdown()
 	self:on_undiscovery(addr)
+end
+
+function M:expose(addr, tnt)
+	if self.nodes[addr] ~= tnt then
+		log.warn("attempt to expose wrong instance %s (exp %s, got %s)", addr, self.nodes[addr], tnt)
+		return
+	end
+
+	tnt.discovery_f:shutdown()
+	self:on_undiscovery(addr)
+	self.nodes[addr] = nil
+	tnt.closed = true
+	if tnt.on_the_fly == 0 then
+		tnt:close()
+	end
 end
 
 function M:on_discovery(addr, res)
@@ -253,8 +330,9 @@ function M:call(method, args, opts, ctx)
 	opts.timeout = math.min(deadline - fiber.time(), opts.timeout)
 	ctx.executed_at = fiber.time()
 	log.verbose("Calling on %s (attempt #%d)", node.addr, ctx.attempt)
-	local conn = self.nodes[node.addr].conn
-	return tail_call(self, ctx, pcall(conn.call, conn, method, args, opts))
+
+	local tnt = self.nodes[node.addr]
+	return tail_call(self, ctx, tnt:call(method, args, opts))
 end
 
 setmetatable(M, {__call = M.new})

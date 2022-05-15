@@ -8,10 +8,8 @@ local M = {
 			reconnect_timeout = config.get('app.discovery.reconnect', 0.3),
 			--[[
 				etcd = {
+					refresh_timeout = 1,
 					prefix = "/server",
-					endpoints = {
-						"http://127.0.0.1:2379",
-					},
 					timeout = 1,
 					boolean_auto = true,
 					integer_auto = true,
