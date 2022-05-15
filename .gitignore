@@ -1,0 +1,5 @@
+.rocks/share
+.rocks/bin
+.rocks/lib
+/tmp/*
+!/tmp/.keep
