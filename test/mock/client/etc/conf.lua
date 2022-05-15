@@ -15,20 +15,15 @@ etcd = { --luacheck: ignore
 	fixed = {
 		common = {
 			box = {
+				log_level = 5,
 				vinyl_memory = 0,
 				vinyl_cache = 0,
 				memtx_memory = 32*2^30,
 			},
-			users = {
-				guest = {
-					roles = {'super'},
-				}
-			},
 		},
 		clusters = {
-			simple_cluster_001 = {
-				master = 'instance_001',
-			},
+			simple_cluster_001 = { master = 'instance_001' },
+			client_001 = { master = 'client_001' },
 		},
 		instances = {
 			instance_001 = {
@@ -42,6 +37,13 @@ etcd = { --luacheck: ignore
 			instance_003 = {
 				cluster = 'simple_cluster',
 				box = { listen = '127.0.0.1:3303' },
+			},
+			client_001 = {
+				cluster = 'client_001',
+				box = {
+					listen = '127.0.0.1:4001',
+					read_only = false,
+				},
 			},
 		},
 	},
