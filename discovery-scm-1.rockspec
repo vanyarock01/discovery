@@ -1,7 +1,7 @@
 package = "discovery"
 version = "scm-1"
 source = {
-   url = "https://github.com/moonlibs/discovery.git",
+   url = "git+https://github.com/moonlibs/discovery.git",
    branch = "master"
 }
 description = {
@@ -14,5 +14,7 @@ dependencies = {
 }
 build = {
    type = "builtin",
-   modules = {}
+   modules = {
+      discovery = "discovery/init.lua",
+   }
 }
