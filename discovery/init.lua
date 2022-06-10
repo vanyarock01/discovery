@@ -67,7 +67,7 @@ local function tt_tail_call(self, ...)
 	return ...
 end
 
-function Tarantool:call(method, args, opts, ctx)
+function Tarantool:call(method, args, opts)
 	self.on_the_fly = self.on_the_fly + 1
 	return tt_tail_call(self, pcall(self.conn.call, self.conn, method, args, opts))
 end
@@ -109,7 +109,7 @@ function M.new(_, args)
 				run_interval = self.upstream.etcd.refresh_timeout,
 				setup = function(ctx) ctx.endpoints = {} end,
 				func = function(ctx)
-					local result, response = config.etcd:list(self.upster.etcd.prefix)
+					local result, _ = config.etcd:list(self.upstream.etcd.prefix)
 					local endpoints = {}
 					for _, info in pairs(result) do
 						if not info.disabled then
