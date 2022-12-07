@@ -1,22 +1,50 @@
+---@module 'discovery'
+
+---@type DiscoveryPool
 local M = {}
 local log = require 'log'
 local fiber = require 'fiber'
 local netbox = require 'net.box'
 local background = require 'background'
 
+---@class DiscoveryTarantool
+---@field addr DiscoveryTarantoolURI URI to tarantool
+---@field conn NetBoxConnection connection to tarantool
+---@field connected boolean is connection is treated as alive
+---@field on_the_fly number current on_the_fly requests
+---@field timeout number (in seconds) timeout of netbox.requests
+---@field async boolean (default: true) is connection must be established in async way
+---@field reconnect_timeout number (seconds) timeout of sleep before reconnect
+---@field closed boolean flag describes that connection was closed
+---@field on_connect fun(DiscoveryTarantool)
+---@field on_disconnect fun(DiscoveryTarantool)
 local Tarantool = {}
 Tarantool.__index = Tarantool
+
+---Is Tarantool connected
+---@return boolean
+function Tarantool:is_connected()
+	if type(self.conn) == 'table' and self.conn.is_connected then
+		return self.conn:is_connected() and self.connected
+	end
+	return false
+end
 
 function Tarantool.new(_, opts)
 	assert(opts.addr, "Tarantool:new: opts.addr is required")
 	assert(opts.timeout, "Tarantool:new opts.timeout is required")
 
 	local self = setmetatable(opts, Tarantool)
+	self:connect()
+	return self
+end
+setmetatable(Tarantool, { __call = Tarantool.new })
 
-	local conn = netbox.connect(opts.addr, {
-		reconnect_after = opts.reconnect_timeout,
-		wait_connected = opts.async or false,
-		timeout = self.timeout,
+function Tarantool:connect()
+	local conn = netbox.connect(self.addr, {
+		reconnect_after = self.reconnect_timeout,
+		wait_connected = self.async or false,
+		connect_timeout = self.timeout,
 	})
 
 	self.on_the_fly = 0
@@ -26,12 +54,13 @@ function Tarantool.new(_, opts)
 	conn:on_connect(function(_)
 		fiber.create(function()
 			fiber.name('dsc/cnt:'..conn.host..':'..conn.port)
+			if self.conn ~= conn then conn:close() return end
 
 			self.connected = true
 			log.info("Connected to %s:%s", conn.host, conn.port)
 
-			if opts.on_connect then
-				local ok, err = pcall(opts.on_connect, self)
+			if self.on_connect then
+				local ok, err = pcall(self.on_connect, self)
 				if not ok then
 					log.error("on_connect hook failed: %s", err)
 				end
@@ -41,22 +70,30 @@ function Tarantool.new(_, opts)
 	conn:on_disconnect(function(_)
 		fiber.create(function()
 			fiber.name('dsc/dsc:'..conn.host..':'..conn.port)
+			if self.conn ~= conn then conn:close() return end
 
 			self.connected = false
-			log.info("Connected to %s:%s", conn.host, conn.port)
+			log.info("Disconnected from %s:%s", conn.host, conn.port)
 
-			if opts.on_disconnect then
-				local ok, err = pcall(opts.on_disconnect, self)
+			if self.on_disconnect then
+				local ok, err = pcall(self.on_disconnect, self)
 				if not ok then
 					log.error("on_disconnect hook failed: %s", err)
 				end
 			end
 		end)
 	end)
-
-	return self
 end
-setmetatable(Tarantool, { __call = Tarantool.new })
+
+function Tarantool:reconnect()
+	self.connected = false
+	if self.conn then
+		self.conn:close()
+		self.conn = nil
+	end
+	if self.on_disconnect then self:on_disconnect() end
+	self:connect()
+end
 
 local function tt_tail_call(self, ...)
 	self.on_the_fly = self.on_the_fly - 1
@@ -72,6 +109,39 @@ function Tarantool:call(method, args, opts)
 	return tt_tail_call(self, pcall(self.conn.call, self.conn, method, args, opts))
 end
 
+---@class DiscoveryOptions
+---@field refresh_timeout number (default: 0.1) refresh timeout of calling discovery func
+---@field net_box_timeout number (seconds, default: 1s) timeout of discovery timeout call
+---@field method string (Lua func which will be called by discovery module)
+
+---@class DiscoveryUpstreamETCD
+---@field refresh_timeout number (default: none) timeout of refreshing etcd list
+---@field prefix string prefix in ETCD tree to fetch instances
+
+---@class DiscoveryUpstream
+---@field net_box_timeout number (seconds, default: 1) default upstream timeout call
+---@field endpoints string[] list of tarantool uris to be connected to
+---@field reconnect_timeout number (seconds, default: 0.3) timeout of reconnect if upstream fails
+---@field etcd DiscoveryUpstreamETCD
+
+---@class DiscoveryProxyOptions
+---@field weight number balancing weight
+
+---@alias DiscoveryTarantoolURI string
+
+---@class DiscoveryPool
+---@field autoconnect boolean (default: true) defines if connection will be established automatically
+---@field upstream DiscoveryUpstream upstream configuration
+---@field discovery DiscoveryOptions discovery configuration
+---@field nodes table<DiscoveryTarantoolURI, DiscoveryTarantool> kv-map of upstream connections to Tarantools
+---@field methods table<string,table<DiscoveryTarantoolURI,DiscoveryProxyOptions>> kv-map of methods to proxy options
+---@field methods_list table<string, {addr: DiscoveryTarantoolURI, max_weight: number}> helper kv-list for balancer
+---@field conds table<string, fiber.cond> kv-map of fiber.conds() for each method. Call waits on this cond.
+
+---Creates new DiscoveryPool to Replicaset
+---@param _ any
+---@param args any
+---@return DiscoveryPool
 function M.new(_, args)
 	assert(type(args) == 'table', "discovery: args must be a table")
 	assert(type(args.discovery) == 'table', "discovery: args.discovery must be a table")
@@ -170,6 +240,9 @@ function M:connect(endpoints)
 	end
 end
 
+---on_connect hook
+---@param addr DiscoveryTarantoolURI
+	---@param tnt DiscoveryTarantool
 function M:on_connect(addr, tnt)
 	tnt.discovery_f = background {
 		name = 'discovery/'..tnt.conn.host..':'..tnt.conn.port,
@@ -180,6 +253,10 @@ function M:on_connect(addr, tnt)
 		func = function(ctx)
 			local res = ctx.tnt.conn:call(self.discovery.method, {}, { timeout = self.discovery.net_box_timeout })
 			self:on_discovery(addr, res)
+		end,
+		on_fail = function(ctx, err)
+			log.error("discovery failed %s", err)
+			ctx.tnt:reconnect()
 		end,
 	}
 end
@@ -243,7 +320,7 @@ function M:rebuild()
 			if not self.nodes[addr] then
 				log.warn("Node %s is not registered in discovery but exists in balancer graph", addr)
 				self.methods[method][addr] = nil
-			elseif not self.nodes[addr].connected then
+			elseif not self.nodes[addr]:is_connected() then
 				log.warn("Disable %s:%s because disconnected", method, addr)
 				self.methods[method][addr] = nil
 			end
@@ -324,14 +401,21 @@ function M:call(method, args, opts, ctx)
 		end
 	end
 
+	local tnt = self.nodes[node.addr]
+	if not tnt:is_connected() then
+		log.warn("Node %s which was choosen for %s has been disconnected",
+			node.addr, method)
+		self:rebuild()
+		return self:call(method, args, opts, ctx)
+	end
+
 	ctx.retriable = node.retriable == true
 	ctx.addr = node.addr
 	ctx.attempt = ctx.attempt + 1
 	opts.timeout = math.min(deadline - fiber.time(), opts.timeout)
 	ctx.executed_at = fiber.time()
-	log.verbose("Calling on %s (attempt #%d)", node.addr, ctx.attempt)
 
-	local tnt = self.nodes[node.addr]
+	log.verbose("Calling on %s (attempt #%d)", node.addr, ctx.attempt)
 	return tail_call(self, ctx, tnt:call(method, args, opts))
 end
 

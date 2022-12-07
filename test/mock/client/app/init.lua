@@ -1,21 +1,22 @@
 local config = require 'config'
 
+local is_luatest = os.getenv "TT_LUATEST"
+local endpoints, etcd
+if is_luatest then
+	endpoints = {"127.0.0.1:3301", "127.0.0.1:3302", "127.0.0.1:3303"}
+else
+	etcd = { refresh_timeout = 1, prefix = '/instances/' }
+end
+
 local M = {
 	server = require 'discovery' {
 		upstream = {
-			endpoints = {'127.0.0.1:3301', '127.0.0.1:3302', '127.0.0.1:3303'},
+			-- Endpoints and ETCD mutually exclusive.
+			endpoints = endpoints,
+			etcd = etcd,
+
 			net_box_timeout = 1,
 			reconnect_timeout = config.get('app.discovery.reconnect', 0.3),
-			--[[
-				etcd = {
-					refresh_timeout = 1,
-					prefix = "/server",
-					timeout = 1,
-					boolean_auto = true,
-					integer_auto = true,
-					master_selection_policy = 'etcd.cluster.master',
-				},
-			]]
 		},
 		discovery = {
 			method = config.get('app.discovery.method', 'app.discovery'),

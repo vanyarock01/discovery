@@ -9,7 +9,7 @@ g.test_proxy_call = function()
 			local r, err = cli:call('app.call', {"app.ping_master", {}, { timeout = 10 }})
 			t.assert_equals(err, nil)
 			t.assert_equals(r.status, 'ok')
-			t.assert_equals(r.instance_name, 'instance_001')
+			t.assert_equals(r.instance_name, 'server_001')
 			t.assert_equals(r.is_master, true)
 		end
 	end
@@ -19,7 +19,7 @@ g.test_proxy_call = function()
 			local r, err = cli:call('app.call', {"app.ping_replica", {}, { timeout = 10 }})
 			t.assert_equals(err, nil)
 			t.assert_equals(r.status, 'ok')
-			t.assert_not_equals(r.instance_name, 'instance_001')
+			t.assert_not_equals(r.instance_name, 'server_001')
 			t.assert_equals(r.is_master, false)
 		end
 	end

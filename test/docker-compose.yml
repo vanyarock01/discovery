@@ -1,0 +1,59 @@
+x-env: &env
+  DISCOVERY: true
+
+x-tt: &tt
+  build: .
+  command: tarantool init.lua
+  privileged: true
+  networks:
+    - tarantool
+
+x-server: &server
+  <<: *tt
+  volumes:
+    - $PWD/mock/server:/opt/tarantool
+    - $PWD/net:/opt/tarantool/net:ro
+
+x-client: &client
+  <<: *tt
+  volumes:
+    - $PWD/mock/client:/opt/tarantool
+    - $PWD/net:/opt/tarantool/net:ro
+    - $PWD/../discovery:/opt/tarantool/.rocks/share/tarantool/discovery:ro
+
+networks:
+  tarantool:
+    name: tt_net
+    driver: bridge
+
+version: "3"
+
+services:
+  server_001:
+    <<: *server
+    container_name: server_001
+    environment:
+      <<: *env
+      TT_INSTANCE_NAME: server_001
+
+  server_002:
+    <<: *server
+    container_name: server_002
+    environment:
+      <<: *env
+      TT_INSTANCE_NAME: server_002
+
+  server_003:
+    <<: *server
+    container_name: server_003
+    environment:
+      <<: *env
+      TT_INSTANCE_NAME: server_003
+
+  client_001:
+    <<: *client
+    container_name: client_001
+    environment:
+      <<: *env
+      TT_INSTANCE_NAME: client_001
+

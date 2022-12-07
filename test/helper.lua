@@ -17,9 +17,9 @@ helper.client_root    = fio.pathjoin(root, 'mock', 'client')
 helper.client_script  = fio.pathjoin(helper.client_root, 'init.lua')
 
 helper.server_names = {
-	instance_001 = { listen_port = 3301 },
-	instance_002 = { listen_port = 3302 },
-	instance_003 = { listen_port = 3303 },
+	server_001 = { listen_port = 3301 },
+	server_002 = { listen_port = 3302 },
+	server_003 = { listen_port = 3303 },
 }
 
 helper.client_names = {
@@ -42,6 +42,7 @@ t.before_suite(function()
 			chdir = helper.server_root,
 			env = {
 				TT_INSTANCE_NAME = name,
+				TT_LUATEST = 'true',
 			},
 			net_box_port = node_cfg.listen_port,
 			net_box_credentials = {
@@ -62,6 +63,7 @@ t.before_suite(function()
 			chdir = helper.client_root,
 			env = {
 				TT_INSTANCE_NAME = name,
+				TT_LUATEST = 'true',
 			},
 			net_box_port = node_cfg.listen_port,
 			net_box_credentials = {
