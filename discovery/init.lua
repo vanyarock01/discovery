@@ -1,7 +1,21 @@
 ---@module 'discovery'
 
----@type DiscoveryPool
+---@class DiscoveryPoolMethods
+---@field addr DiscoveryTarantoolURI
+---@field max_weight number
+---@field alias string?
+
+---@class DiscoveryPool
+---@field autoconnect boolean (default: true) defines if connection will be established automatically
+---@field upstream DiscoveryUpstream upstream configuration
+---@field discovery DiscoveryOptions discovery configuration
+---@field nodes table<DiscoveryTarantoolURI, DiscoveryTarantool> kv-map of upstream connections to Tarantools
+---@field methods table<string,table<DiscoveryTarantoolURI,DiscoveryProxyOptions>> kv-map of methods to proxy options
+---@field methods_list table<string, DiscoveryPoolMethods[]> helper kv-list for balancer
+---@field conds table<string, fiber.cond> kv-map of fiber.conds() for each method. Call waits on this cond.
 local M = {}
+
+local fun = require 'fun'
 local log = require 'log'
 local fiber = require 'fiber'
 local netbox = require 'net.box'
@@ -18,6 +32,7 @@ local background = require 'background'
 ---@field closed boolean flag describes that connection was closed
 ---@field on_connect fun(DiscoveryTarantool)
 ---@field on_disconnect fun(DiscoveryTarantool)
+---@field discovery_f table background job
 local Tarantool = {}
 Tarantool.__index = Tarantool
 
@@ -40,6 +55,36 @@ function Tarantool.new(_, opts)
 end
 setmetatable(Tarantool, { __call = Tarantool.new })
 
+local function tarantool_on_connect(self, conn)
+	fiber.name('dsc/cnt:'..conn.host..':'..conn.port, {truncate = true})
+	if self.conn ~= conn then conn:close() return end
+
+	self.connected = true
+	log.info("Connected to %s:%s", conn.host, conn.port)
+
+	if self.on_connect then
+		local ok, err = pcall(self.on_connect, self)
+		if not ok then
+			log.error("on_connect hook failed: %s", err)
+		end
+	end
+end
+
+local function tarantool_on_disconnect(self, conn)
+	fiber.name('dsc/dsc:'..conn.host..':'..conn.port, { truncate = true })
+	if self.conn ~= conn then conn:close() return end
+
+	self.connected = false
+	log.info("Disconnected from %s:%s", conn.host, conn.port)
+
+	if self.on_disconnect then
+		local ok, err = pcall(self.on_disconnect, self)
+		if not ok then
+			log.error("on_disconnect hook failed: %s", err)
+		end
+	end
+end
+
 function Tarantool:connect()
 	local conn = netbox.connect(self.addr, {
 		reconnect_after = self.reconnect_timeout,
@@ -51,47 +96,20 @@ function Tarantool:connect()
 	self.conn = conn
 	self.connected = false
 
-	conn:on_connect(function(_)
-		fiber.create(function()
-			fiber.name('dsc/cnt:'..conn.host..':'..conn.port)
-			if self.conn ~= conn then conn:close() return end
-
-			self.connected = true
-			log.info("Connected to %s:%s", conn.host, conn.port)
-
-			if self.on_connect then
-				local ok, err = pcall(self.on_connect, self)
-				if not ok then
-					log.error("on_connect hook failed: %s", err)
-				end
-			end
-		end)
+	conn:on_connect(function(cnn)
+		fiber.create(tarantool_on_connect, self, cnn)
 	end)
-	conn:on_disconnect(function(_)
-		fiber.create(function()
-			fiber.name('dsc/dsc:'..conn.host..':'..conn.port)
-			if self.conn ~= conn then conn:close() return end
-
-			self.connected = false
-			log.info("Disconnected from %s:%s", conn.host, conn.port)
-
-			if self.on_disconnect then
-				local ok, err = pcall(self.on_disconnect, self)
-				if not ok then
-					log.error("on_disconnect hook failed: %s", err)
-				end
-			end
-		end)
+	conn:on_disconnect(function(cnn)
+		fiber.create(tarantool_on_disconnect, self, cnn)
 	end)
 end
 
 function Tarantool:reconnect()
-	self.connected = false
 	if self.conn then
-		self.conn:close()
+		pcall(self.conn.close, self.conn)
 		self.conn = nil
 	end
-	if self.on_disconnect then self:on_disconnect() end
+	fiber.sleep(self.reconnect_timeout)
 	self:connect()
 end
 
@@ -126,17 +144,10 @@ end
 
 ---@class DiscoveryProxyOptions
 ---@field weight number balancing weight
+---@field retriable boolean? whether method is retriable
+---@field alias string? how method should be called instead of anounced
 
 ---@alias DiscoveryTarantoolURI string
-
----@class DiscoveryPool
----@field autoconnect boolean (default: true) defines if connection will be established automatically
----@field upstream DiscoveryUpstream upstream configuration
----@field discovery DiscoveryOptions discovery configuration
----@field nodes table<DiscoveryTarantoolURI, DiscoveryTarantool> kv-map of upstream connections to Tarantools
----@field methods table<string,table<DiscoveryTarantoolURI,DiscoveryProxyOptions>> kv-map of methods to proxy options
----@field methods_list table<string, {addr: DiscoveryTarantoolURI, max_weight: number}> helper kv-list for balancer
----@field conds table<string, fiber.cond> kv-map of fiber.conds() for each method. Call waits on this cond.
 
 ---Creates new DiscoveryPool to Replicaset
 ---@param _ any
@@ -163,7 +174,7 @@ function M.new(_, args)
 	args.discovery.refresh_timeout = args.discovery.refresh_timeout or 0.1
 	args.discovery.net_box_timeout = args.discovery.net_box_timeout or 1
 
-	local self = setmetatable(args, {__index = M})
+	local self = setmetatable(args, {__index = M, __serialize = M.info})
 	self.nodes = {}
 	self.methods = {}
 	self.methods_list = {}
@@ -240,30 +251,44 @@ function M:connect(endpoints)
 	end
 end
 
+---comment
+---@param pool DiscoveryPool
+---@param tnt DiscoveryTarantool
+local function _discovery_f(_, pool, tnt)
+	local res = tnt.conn:call(pool.discovery.method, {}, { timeout = pool.discovery.net_box_timeout })
+	pool:on_discovery(tnt.addr, res)
+end
+
+local function _setup_f(job)
+	job.tnt = job.args[2]
+end
+
+local function _fail_f(job, err)
+	log.error("discovery failed %s", err)
+	job.tnt:reconnect()
+end
+
 ---on_connect hook
 ---@param addr DiscoveryTarantoolURI
-	---@param tnt DiscoveryTarantool
+---@param tnt DiscoveryTarantool
 function M:on_connect(addr, tnt)
+	assert(tnt.addr == addr)
 	tnt.discovery_f = background {
 		name = 'discovery/'..tnt.conn.host..':'..tnt.conn.port,
-		setup = function(ctx) ctx.tnt = tnt end,
 		run_interval = self.discovery.refresh_timeout,
 		restart = 2*math.max(self.discovery.refresh_timeout, self.discovery.net_box_timeout),
-		wait = false, -- wait noone
-		func = function(ctx)
-			local res = ctx.tnt.conn:call(self.discovery.method, {}, { timeout = self.discovery.net_box_timeout })
-			self:on_discovery(addr, res)
-		end,
-		on_fail = function(ctx, err)
-			log.error("discovery failed %s", err)
-			ctx.tnt:reconnect()
-		end,
+		wait = false,
+		args = { self, tnt },
+		setup = _setup_f,
+		func = _discovery_f,
+		on_fail = _fail_f,
 	}
 end
 
 function M:on_disconnect(addr, tnt)
 	log.info("Gracefull shutdown for background discovery for %s", addr)
 	tnt.discovery_f:shutdown()
+	tnt.discovery_f = nil
 	self:on_undiscovery(addr)
 end
 
@@ -296,7 +321,7 @@ function M:on_discovery(addr, res)
 		if not self.methods[method][addr] then
 			self.methods[method][addr] = {}
 		end
-		for _, key in ipairs{"weight", "retriable"} do
+		for _, key in ipairs{"weight", "retriable", "alias"} do
 			if self.methods[method][addr][key] ~= info[key] then
 				do_rebuild = true
 			end
@@ -332,7 +357,7 @@ function M:rebuild()
 		for node_addr, balance in pairs(self.methods[method]) do
 			if balance.weight ~= 0 then
 				total_weight = total_weight + balance.weight
-				table.insert(list, { addr = node_addr, max_weight = total_weight })
+				table.insert(list, { addr = node_addr, max_weight = total_weight, alias = balance.alias })
 				table.insert(addrs, ("%s:%s"):format(node_addr, total_weight))
 			end
 		end
@@ -346,6 +371,46 @@ function M:rebuild()
 			end
 		end
 	end
+end
+
+---Returns instant info
+---@return table
+function M:info()
+	return {
+		discovery = self.discovery,
+		nodes = fun.iter(self.nodes)
+			---@param name string
+			---@param node DiscoveryTarantool
+			:map(function(name, node)
+				return name, {
+					connected = node:is_connected(),
+					reconnect_timeout = node.reconnect_timeout,
+					discovery_f = node.discovery_f,
+				}
+			end)
+			:tomap(),
+		methods = table.deepcopy(self.methods),
+		upstream = table.deepcopy(self.upstream),
+	}
+end
+
+---Reanounces discovery option
+---@return table<string,DiscoveryProxyOptions>
+function M:anounce()
+	---@type table<string,DiscoveryProxyOptions>
+	local dsc = {}
+	for method, methodInfo in pairs(self.methods) do
+		dsc[method] = { weight = 0 }
+		for _, info in pairs(methodInfo) do
+			if info.retriable then
+				dsc[method].retriable = true
+			end
+			if type(info.weight) == 'number' then
+				dsc[method].weight = dsc[method].weight + info.weight
+			end
+		end
+	end
+	return dsc
 end
 
 local function tail_call(self, ctx, pcall_ok, ...)
@@ -364,6 +429,27 @@ local function tail_call(self, ctx, pcall_ok, ...)
 	error(...)
 end
 
+---@class DiscoveryCallOptions
+---@field timeout? number timeout of the call
+---@field deadline? number (timestamp) deadline when response must be received
+
+---@class DiscoveryCallContext
+---@field started_at number (timestamp) fiber.time() of first call
+---@field attempt number amount of retried attempts
+---@field method string Lua function
+---@field args any[] arguments of the Lua function
+---@field deadline number (timestamp) deadline of the function call
+---@field addr string URI of tarantool where method is executing
+---@field retriable boolean true if method is retriable
+
+
+---Calls given method on instance
+---@param method string Lua func to be called
+---@param args? any[] arbitary arguments to the function
+---@param opts? DiscoveryCallOptions
+---@param ctx? DiscoveryCallContext for internal use mostly
+---@return boolean
+---@return string
 function M:call(method, args, opts, ctx)
 	args = args or {}
 	opts = opts or {}
@@ -415,8 +501,10 @@ function M:call(method, args, opts, ctx)
 	opts.timeout = math.min(deadline - fiber.time(), opts.timeout)
 	ctx.executed_at = fiber.time()
 
+	local call_method = node.alias or ctx.method
+
 	log.verbose("Calling on %s (attempt #%d)", node.addr, ctx.attempt)
-	return tail_call(self, ctx, tnt:call(method, args, opts))
+	return tail_call(self, ctx, tnt:call(call_method, args, opts))
 end
 
 setmetatable(M, {__call = M.new})
