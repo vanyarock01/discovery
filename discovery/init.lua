@@ -1,7 +1,9 @@
 ---@module 'discovery'
 
 ---@type DiscoveryPool
-local M = {}
+local M = {
+	_VERSION = '0.10.0',
+}
 local log = require 'log'
 local fiber = require 'fiber'
 local netbox = require 'net.box'
@@ -126,6 +128,7 @@ end
 
 ---@class DiscoveryProxyOptions
 ---@field weight number balancing weight
+---@field retriable boolean? is method is retriable
 
 ---@alias DiscoveryTarantoolURI string
 
@@ -332,7 +335,7 @@ function M:rebuild()
 		for node_addr, balance in pairs(self.methods[method]) do
 			if balance.weight ~= 0 then
 				total_weight = total_weight + balance.weight
-				table.insert(list, { addr = node_addr, max_weight = total_weight })
+				table.insert(list, { addr = node_addr, max_weight = total_weight, retriable = balance.retriable })
 				table.insert(addrs, ("%s:%s"):format(node_addr, total_weight))
 			end
 		end
@@ -355,9 +358,16 @@ local function tail_call(self, ctx, pcall_ok, ...)
 		return ...
 	end
 
-	log.error("call %s to {%s} failed with: %s", ctx.method, ctx.addr, ...)
+	log.error("call %s to {%s} (attempt=%s,retriable=%s,duration=%.3fs,total=%.3fs,left=%.3fs) failed with: %s",
+		ctx.method, ctx.addr, ctx.attempt, ctx.retriable,
+		fiber.time()-ctx.executed_at,
+		fiber.time()-ctx.started_at,
+		ctx.deadline - fiber.time(),
+		...
+	)
 
 	if ctx.retriable then
+		ctx.last_error = ...
 		return self:call(ctx.method, ctx.args, ctx.opts, ctx)
 	end
 
@@ -373,15 +383,17 @@ function M:call(method, args, opts, ctx)
 		started_at = fiber.time(),
 		attempt = 0,
 		method = method,
+		max_attempts = tonumber(opts.max_attempts),
 		args = args,
 	}
 
 	local deadline = ctx.deadline or opts.deadline or (fiber.time() + opts.timeout)
 	if deadline < fiber.time() then
-		return false, "TimedOut of discovery reached"
+		error(("Timeout for discovery of %s exceeded"):format(method))
 	end
 
 	ctx.deadline = deadline
+	opts.max_attempts = nil
 
 	local balance = self.methods_list[method]
 	if not balance or #balance == 0 then
@@ -391,17 +403,66 @@ function M:call(method, args, opts, ctx)
 		return self:call(method, args, opts, ctx)
 	end
 
-	local rnd = math.random(0, balance[#balance].max_weight)
-	local node do
-		for i = 1, #balance do
-			if rnd <= balance[i].max_weight then
-				node = balance[i]
-				break
+	local node, node_addr do
+		if ctx.attempt == 0 then -- this is first attempt
+			local rnd = math.random(0, balance[#balance].max_weight)
+			for i = 1, #balance do
+				if rnd <= balance[i].max_weight then
+					node = balance[i]
+					node_addr = node.addr
+					break
+				end
+			end
+		else
+			if ctx.max_attempts and ctx.attempt == ctx.max_attempts then
+				error(ctx.last_error)
+			end
+			if not ctx.balance_order then
+				-- peak all ids except balance_start (it is already failed)
+				local ids = table.new(#balance - 1, 0)
+				local no = 1
+				for i = 1, #balance do
+					local addr = balance[i].addr
+					if ctx.addr ~= addr then
+						ids[no] = addr
+						no = no + 1
+					end
+				end
+				-- Fisher-Yates shuffle
+				for i = #ids, 2, -1 do
+					local j = math.random(i)
+					ids[i], ids[j] = ids[j], ids[i] -- swap
+				end
+				ctx.balance_order = ids
+			end
+
+			-- circuit breaker (noone left to retry):
+			if ctx.attempt > #ctx.balance_order then
+				error(ctx.last_error)
+			end
+
+			-- this loop almost always will be executed once
+			-- but if `balance` is rebuilded after last call
+			-- then we might face some inconsistenct in ctx.balance_order
+			-- values and indices in `balance`
+			for _ = ctx.attempt, #ctx.balance_order do
+				node_addr = ctx.balance_order[ctx.attempt]
+				node = self.methods[method][node_addr]
+				if node then
+					break
+				end
+			end
+
+			-- if node is not found then we reraise last error
+			if not node then
+				error(ctx.last_error)
 			end
 		end
 	end
 
-	local tnt = self.nodes[node.addr]
+	assert(node)
+
+	local tnt = self.nodes[node_addr]
 	if not tnt:is_connected() then
 		log.warn("Node %s which was choosen for %s has been disconnected",
 			node.addr, method)
@@ -410,12 +471,14 @@ function M:call(method, args, opts, ctx)
 	end
 
 	ctx.retriable = node.retriable == true
-	ctx.addr = node.addr
+	ctx.addr = node_addr
 	ctx.attempt = ctx.attempt + 1
 	opts.timeout = math.min(deadline - fiber.time(), opts.timeout)
 	ctx.executed_at = fiber.time()
+	opts.deadline = nil
+	ctx.opts = opts
 
-	log.verbose("Calling on %s (attempt #%d)", node.addr, ctx.attempt)
+	log.verbose("Calling %s on %s (attempt #%d)", method, node.addr, ctx.attempt)
 	return tail_call(self, ctx, tnt:call(method, args, opts))
 end
 

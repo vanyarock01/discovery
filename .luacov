@@ -5,3 +5,11 @@ exclude = {
     '/tmp/',
     '/luatest/coverage_utils'
 }
+
+coveralls = {
+        root = "/",
+        debug = true,
+        pathcorrect = {
+                { "^/home/runner/work/discovery/discovery/", "" },
+        },
+}

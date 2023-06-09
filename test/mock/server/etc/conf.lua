@@ -26,7 +26,7 @@ etcd = { --luacheck: ignore
 				vinyl_cache = 0,
 				log_format = 'plain',
 				log_level = 5,
-				memtx_memory = 32*2^30,
+				memtx_memory = 32*2^20,
 			},
 			users = {
 				guest = {

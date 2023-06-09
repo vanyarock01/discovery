@@ -31,6 +31,18 @@ function users.get(uid)
     return server:call("users.get", { uid }, { timeout = 0.1 }) -- You may specify timeout on each call
 end
 
+function users.retriable_get(uid)
+    -- You may specify timeout net_box_call and deadline for overall call
+    -- if method is retriable then other replicas will be tried too (use wisely)
+    -- each upstream must be called at most once. If all upstreams raised an error, then last_error will be reraised
+    return server:call("users.get", { uid }, { timeout = 0.1, deadline = fiber.time()+0.5 })
+end
+
+function users.limited_retriable_get(id)
+    -- Also user might limit number of attempts to perform on the call (good idea)
+    return server:call("users.get", { uid }, { timeout = 0.1, deadline = fiber.time()+0.5, max_attempts = 2 })
+end
+
 function users.insert(user, deadline)
     return server:call("users.insert", { user }, { deadline = deadline }) -- You may even specify deadline of the request. You receive response or timeout after deadline seconds
 end

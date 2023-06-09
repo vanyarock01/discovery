@@ -5,6 +5,10 @@ local root = fio.dirname(fio.abspath(debug.getinfo(1, "S").source:sub(2)))
 local libs = fio.pathjoin(root, '..', '..', '..')
 package.path = table.concat({package.path, libs..'/?.lua', libs..'/?/init.lua'}, ';')
 
+if os.getenv('LUACOV_ENABLE') then
+	require 'luacov.runner'.init()
+end
+
 require 'config' {
 	mkdir = true,
 	file = 'etc/conf.lua',
