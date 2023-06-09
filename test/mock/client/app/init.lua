@@ -1,4 +1,6 @@
 local config = require 'config'
+local json = require 'json'
+local log = require 'log'
 
 local is_luatest = os.getenv "TT_LUATEST"
 local endpoints, etcd
@@ -31,6 +33,7 @@ function M.ping()
 end
 
 function M.call(method, args, opts)
+	log.verbose("proxy call %s %s %s", method, json.encode(args), json.encode(opts))
 	return M.server:call(method, args, opts)
 end
 

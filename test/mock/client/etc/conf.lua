@@ -27,7 +27,7 @@ etcd = { --luacheck: ignore
 				log_format = 'plain',
 				vinyl_memory = 0,
 				vinyl_cache = 0,
-				memtx_memory = 32*2^30,
+				memtx_memory = 32*2^20,
 			},
 		},
 		clusters = {

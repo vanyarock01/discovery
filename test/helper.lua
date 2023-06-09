@@ -43,6 +43,7 @@ t.before_suite(function()
 			env = {
 				TT_INSTANCE_NAME = name,
 				TT_LUATEST = 'true',
+				LUACOV_ENABLE = os.getenv('LUACOV_ENABLE'),
 			},
 			net_box_port = node_cfg.listen_port,
 			net_box_credentials = {
@@ -64,6 +65,7 @@ t.before_suite(function()
 			env = {
 				TT_INSTANCE_NAME = name,
 				TT_LUATEST = 'true',
+				LUACOV_ENABLE = os.getenv('LUACOV_ENABLE'),
 			},
 			net_box_port = node_cfg.listen_port,
 			net_box_credentials = {
