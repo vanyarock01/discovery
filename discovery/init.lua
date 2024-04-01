@@ -351,6 +351,13 @@ function M:rebuild()
 	end
 end
 
+local time_tolerance_mks = 100
+
+local function is_deadline_exceeded(deadline, now)
+	now = now or fiber.time()
+	return (now-deadline)*1e6 > time_tolerance_mks
+end
+
 local function tail_call(self, ctx, pcall_ok, ...)
 	local now = fiber.time()
 	ctx.total_time = now-ctx.started_at
@@ -377,10 +384,11 @@ local function tail_call(self, ctx, pcall_ok, ...)
 		reason = tostring(err),
 	}
 
-	if ctx.retriable then
+	if ctx.retriable and not is_deadline_exceeded(ctx.deadline, fiber.time()+0.001) then
 		-- local json = require 'json'
 		-- log.warn("retrying call(%s, %s, %s, %s)",
 		-- 	ctx.method, json.encode(ctx.args), json.encode(ctx.opts), json.encode(ctx))
+		fiber.sleep(0.001)
 		return self:call(ctx.method, ctx.args, ctx.opts, ctx)
 	end
 
@@ -426,9 +434,14 @@ function M:call(method, args, opts, ctx)
 		end
 	end
 
-	if deadline < fiber.time() then
+	if is_deadline_exceeded(deadline) then
 		ctx.total_time = fiber.time() - ctx.started_at
 		ctx.execution_time = ctx.execution_time or -1
+
+		if ctx.last_error then
+			ctx.last_error:raise()
+		end
+
 		box.error{
 			reason = ("Timeout for discovery of %s exceeded"):format(method),
 			type = 'DiscoveryError',
@@ -444,7 +457,7 @@ function M:call(method, args, opts, ctx)
 		log.verbose("No nodes available for %s. Waiting %.3fs", method, deadline - fiber.time())
 		self.conds[method] = self.conds[method] or fiber.cond()
 		self.conds[method]:wait(deadline - fiber.time())
-		if deadline < fiber.time() then
+		if is_deadline_exceeded(deadline) then
 			ctx.total_time = fiber.time() - ctx.started_at
 			ctx.execution_time = ctx.execution_time or -1
 			box.error{
