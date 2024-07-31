@@ -172,9 +172,9 @@ function M.new(_, args)
 	self.methods_list = {}
 	self.conds = {}
 
+	local config_module = args.config_module or require'config'
 	if self.autoconnect ~= false then
 		if self.upstream.etcd then
-			local config = require 'config'
 			self.etcd_f = background {
 				name = 'discovery/etcd',
 				wait = false,
@@ -182,7 +182,7 @@ function M.new(_, args)
 				run_interval = self.upstream.etcd.refresh_timeout,
 				setup = function(ctx) ctx.endpoints = {} end,
 				func = function(ctx)
-					local result, _ = config.etcd:list(self.upstream.etcd.prefix)
+					local result, _ = config_module.etcd:list(self.upstream.etcd.prefix)
 					local endpoints = {}
 					for _, info in pairs(result) do
 						if not info.disabled then
