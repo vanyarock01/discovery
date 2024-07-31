@@ -172,9 +172,9 @@ function M.new(_, args)
 	self.methods_list = {}
 	self.conds = {}
 
-	local config_module = args.config_module or require'config'
 	if self.autoconnect ~= false then
 		if self.upstream.etcd then
+			local config_module = args.config_module or require'config'
 			self.etcd_f = background {
 				name = 'discovery/etcd',
 				wait = false,
